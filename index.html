@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pembaca Data Foto (OCR)</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#1b1f24;--mu:#5d6773;--bd:#d9dee4;--ac:#1a6ef0;--act:#fff;--er:#c62828}
+@media (prefers-color-scheme:dark){:root{--bg:#14171b;--card:#1d2127;--tx:#e8ebef;--mu:#9aa4b0;--bd:#323943;--ac:#5b97ff;--act:#0b1220;--er:#ff7b7b}}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:860px;margin:0 auto;padding:18px 14px 40px}
+h1{font-size:20px;margin:0 0 4px}p.s{color:var(--mu);margin:0 0 14px;font-size:13px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:14px;margin-bottom:14px}
+.drop{border:2px dashed var(--bd);border-radius:12px;padding:26px 12px;text-align:center;cursor:pointer;color:var(--mu)}
+.drop.on{border-color:var(--ac);color:var(--ac)}
+.th{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.th div{width:84px;font-size:10px;color:var(--mu);word-break:break-all}
+.th img{width:84px;height:84px;object-fit:cover;border-radius:8px;border:1px solid var(--bd);display:block}
+button{font:inherit;border:1px solid var(--bd);background:var(--card);color:var(--tx);padding:9px 14px;border-radius:9px;cursor:pointer}
+button.p{background:var(--ac);color:var(--act);border-color:var(--ac);font-weight:600}
+button:disabled{opacity:.5;cursor:default}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+textarea{width:100%;min-height:150px;font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:9px;padding:10px;box-sizing:border-box;white-space:pre;overflow:auto;resize:vertical}
+#st{font-size:13px;color:var(--mu)}#st.er{color:var(--er)}
+#warn{font-size:13px;color:var(--er);margin:0 0 12px;white-space:pre-line}
+label{font-size:13px;color:var(--mu)}
+pre{white-space:pre-wrap;font-size:11px;color:var(--mu);max-height:260px;overflow:auto}
+</style>
+</head>
+<body>
+<main>
+<h1>Pembaca Data Foto (OCR, tanpa AI)</h1>
+<p class="s">Upload foto layar Speedtest + tabel seluler 5G + watermark Timemark. Hasil berupa teks dipisah TAB untuk Excel. Foto diproses di browser, tidak dikirim ke server.</p>
+
+<div class="card">
+  <div class="drop" id="drop">Klik atau seret foto ke sini (bisa banyak foto)</div>
+  <input type="file" id="fi" accept="image/*" multiple hidden>
+  <div class="th" id="th"></div>
+  <div class="row" style="margin-top:12px">
+    <button class="p" id="go" disabled>Baca Data</button>
+    <button id="clr" disabled>Reset</button>
+    <label><input type="checkbox" id="hd"> Sertakan header kolom</label>
+    <span id="st"></span>
+  </div>
+</div>
+
+<div id="warn"></div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between;margin-bottom:8px">
+    <strong>Data pengukuran</strong><button id="cp" disabled>Copy</button>
+  </div>
+  <textarea id="out" spellcheck="false" placeholder="DL, UL, PCI, RSRP, SINR, RSRQ, Jitter, Latensi"></textarea>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between;margin-bottom:8px">
+    <strong>Lat &amp; Long (dari watermark)</strong><button id="cp2" disabled>Copy</button>
+  </div>
+  <textarea id="out2" spellcheck="false" style="min-height:100px" placeholder="Lat, Long"></textarea>
+</div>
+
+<details class="card"><summary>Teks mentah hasil OCR (untuk pengecekan)</summary><pre id="raw"></pre></details>
+</main>
+
+<script>
+const $=id=>document.getElementById(id);
+const COLS=["DL","UL","PCI","RSRP","SINR","RSRQ","Jitter","Latensi"],COLS2=["Lat","Long"];
+const NEED=["dl","ul","pci","rsrp","sinr","rsrq","jitter","ping","lat","lon"];
+let files=[],R=[],worker=null,label="";
+const st=(t,e)=>{$("st").textContent=t;$("st").className=e?"er":""};
+
+const drop=$("drop"),fi=$("fi");
+drop.onclick=()=>fi.click();
+drop.ondragover=e=>{e.preventDefault();drop.classList.add("on")};
+drop.ondragleave=()=>drop.classList.remove("on");
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove("on");add(e.dataTransfer.files)};
+fi.onchange=()=>{add(fi.files);fi.value=""};
+function add(l){for(const f of l)if(f.type.startsWith("image/"))files.push(f);renderTh()}
+function renderTh(){
+  const th=$("th");th.innerHTML="";
+  files.forEach((f,i)=>{const d=document.createElement("div"),m=document.createElement("img");
+    m.src=URL.createObjectURL(f);d.appendChild(m);d.appendChild(document.createTextNode((i+1)+". "+f.name));th.appendChild(d)});
+  $("go").disabled=!files.length;$("clr").disabled=!files.length;
+}
+$("clr").onclick=()=>{files=[];R=[];renderTh();show();$("raw").textContent="";$("warn").textContent="";st("")};
+
+async function getWorker(){
+  if(!worker){
+    worker=await Tesseract.createWorker("eng",1,{logger:m=>{
+      if(m.status==="recognizing text")st(label+" "+Math.round(m.progress*100)+"%");
+      else if(m.status)st("Menyiapkan OCR ("+m.status+")...")}});
+    await worker.setParameters({preserve_interword_spaces:"1"});
+  }
+  return worker;
+}
+// perbesar 2x, hitam-putih; inv=true membalik warna (untuk teks putih di latar gelap)
+async function prep(f,inv){
+  const b=await createImageBitmap(f),s=Math.min(2,3200/Math.max(b.width,b.height));
+  const c=document.createElement("canvas");c.width=Math.round(b.width*s);c.height=Math.round(b.height*s);
+  const x=c.getContext("2d");x.drawImage(b,0,0,c.width,c.height);
+  const im=x.getImageData(0,0,c.width,c.height),d=im.data;
+  for(let i=0;i<d.length;i+=4){let g=.299*d[i]+.587*d[i+1]+.114*d[i+2];if(inv)g=255-g;d[i]=d[i+1]=d[i+2]=g}
+  x.putImageData(im,0,0);return c;
+}
+
+function parse(t){
+  t=t.replace(/[\u2212\u2013\u2014]/g,"-");
+  const o={};let m;
+  if(m=t.match(/DOWNLOAD[\s\S]{0,60}?(\d{1,4}[.,]\d{1,2})\b/i))o.dl=m[1];
+  if(m=t.match(/UPLOAD[\s\S]{0,60}?(\d{1,4}[.,]\d{1,2})\b/i))o.ul=m[1];
+  if(m=t.match(/Ping\D{0,4}(\d{1,4})\s*ms/i))o.ping=m[1];
+  if(m=t.match(/Jitter\D{0,4}(\d{1,4})\s*ms/i))o.jitter=m[1];
+  // baris PCC pada tabel 5G: NRARFCN Band Bandwidth PCI RSRP RSRQ RSSI SINR
+  const i=t.search(/\bPCC\b/i);
+  if(i>=0){
+    let seg=t.slice(i+3,i+140);const k=seg.search(/Informasi/i);if(k>0)seg=seg.slice(0,k);
+    seg=seg.replace(/\bN\s?\d{1,3}\b/gi," ").replace(/\d+\s*MHz/gi," ");
+    const n=(seg.match(/-?\d+/g)||[]).filter(v=>v.replace("-","").length<5);
+    if(n[0]!=null)o.pci=n[0];
+    if(n[1]!=null)o.rsrp="-"+Math.abs(parseInt(n[1]));   // RSRP selalu negatif
+    if(n[2]!=null)o.rsrq="-"+Math.abs(parseInt(n[2]));   // RSRQ selalu negatif
+    if(n[4]!=null)o.sinr=n[4];
+  }
+  // watermark: Koordinat: 8.095527°S, 112.167737°E
+  const j=t.search(/Koordinat/i);
+  const seg=j>=0?t.slice(j,j+90):t;
+  const dec=seg.match(/\d{1,3}[.,]\d{5,}/g);
+  if(dec&&dec.length>=2){
+    const a=seg.indexOf(dec[0])+dec[0].length,b=seg.indexOf(dec[1],a);
+    const h1=seg.slice(a,a+5),h2=seg.slice(b+dec[1].length,b+dec[1].length+5);
+    o.lat=(/N/i.test(h1)?"":"-")+dec[0].replace(",",".");
+    o.lon=(/W/i.test(h2)?"-":"")+dec[1].replace(",",".");
+  }
+  return o;
+}
+const tr=v=>String(v??"").trim().replace(/^(-?\d+)[.,]\d+.*$/,"$1");
+
+async function run(){
+  $("go").disabled=true;R=[];$("raw").textContent="";$("warn").textContent="";
+  let w;try{w=await getWorker()}catch(e){st("OCR gagal dimuat (cek koneksi internet).",1);$("go").disabled=false;return}
+  const passes=[[false,"3"],[true,"11"],[false,"11"]];
+  for(let i=0;i<files.length;i++){
+    const o={},raw=[];
+    for(const [inv,psm] of passes){
+      if(NEED.every(k=>o[k]!=null))break;
+      label=`Foto ${i+1}/${files.length}:`;
+      try{
+        await w.setParameters({tessedit_pageseg_mode:psm});
+        const r=await w.recognize(await prep(files[i],inv));
+        raw.push(r.data.text);
+        const p=parse(r.data.text);
+        for(const k in p)if(o[k]==null)o[k]=p[k];
+      }catch(e){}
+    }
+    R.push({o,miss:NEED.filter(k=>o[k]==null)});
+    $("raw").textContent+=`--- Foto ${i+1}: ${files[i].name} ---\n`+raw.join("\n=====\n")+"\n\n";
+    show();
+  }
+  st(`Selesai: ${files.length} foto.`);$("go").disabled=false;
+}
+function show(){
+  const hd=$("hd").checked;
+  const a=R.map(r=>[r.o.dl,r.o.ul,r.o.pci,r.o.rsrp,r.o.sinr,r.o.rsrq,r.o.jitter,r.o.ping].map(tr).join("\t"));
+  const b=R.map(r=>[r.o.lat,r.o.lon].map(v=>v??"").join("\t"));
+  if(hd){a.unshift(COLS.join("\t"));b.unshift(COLS2.join("\t"))}
+  $("out").value=a.join("\n");$("out2").value=b.join("\n");
+  $("cp").disabled=$("cp2").disabled=!R.length;
+  $("warn").textContent=R.map((r,i)=>r.miss.length?`Foto ${i+1}: tidak terbaca -> ${r.miss.join(", ")}. Isi/cek manual.`:"").filter(Boolean).join("\n");
+}
+$("hd").onchange=show;$("go").onclick=run;
+async function cpy(id,btn){
+  const t=$(id).value;
+  try{await navigator.clipboard.writeText(t)}catch(e){$(id).select();document.execCommand("copy")}
+  const o=btn.textContent;btn.textContent="Tersalin";setTimeout(()=>btn.textContent=o,1500);
+}
+$("cp").onclick=()=>cpy("out",$("cp"));$("cp2").onclick=()=>cpy("out2",$("cp2"));
+</script>
+</body>
+</html>
